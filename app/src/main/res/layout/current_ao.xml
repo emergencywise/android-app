@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+   android:orientation="vertical"
+   android:layout_width="fill_parent"
+   android:layout_height="fill_parent">
+    
+   <TableLayout
+        android:layout_width="fill_parent"
+    	android:layout_height="wrap_content"
+    	android:layout_weight="0"
+    	android:gravity="left">
+	    <TableRow>
+	        <TextView
+	            android:layout_column="1"
+	            android:text="@string/server_name"
+	            android:gravity="right"
+	            android:padding="3dip" />
+	        <TextView
+	            android:id="@+id/server_name"
+	            android:gravity="left"
+	            android:padding="3dip" />
+	    </TableRow>                
+    </TableLayout> 
+    
+	<ListView
+	    android:id="@+id/android:list"
+	    android:layout_width="fill_parent"
+	    android:layout_height="fill_parent"
+	    android:layout_weight="1"
+	    />
+
+</LinearLayout>

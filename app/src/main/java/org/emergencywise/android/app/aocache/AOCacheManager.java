@@ -1,0 +1,366 @@
+package org.emergencywise.android.app.aocache;
+
+import android.content.Context;
+import android.net.Uri;
+import android.util.Log;
+
+import org.emergencywise.android.app.aocache.model.AOManifest;
+import org.emergencywise.android.app.util.Filer;
+import org.emergencywise.android.app.util.Filer.Type;
+import org.emergencywise.android.app.util.JsonTool;
+import org.emergencywise.android.app.util.LocalLogger;
+
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+public class AOCacheManager
+{
+	private static final String TAG = AOCacheManager.class.getName();
+	public static final Pattern packageFilePattern = Pattern.compile( "^(.*)-v(\\d+)\\.zip$", Pattern.CASE_INSENSITIVE );
+	
+	public static Uri asUri( String ao, String path )
+	{
+		if( path == null ) return null;
+		path = path.trim();
+		
+		if( path.indexOf( "://" ) > -1 )
+		{
+			// path has absolute url, so simply pass it back
+			return Uri.parse( path );
+		}
+		
+		return Uri.parse( "ao://" + ao + '/' + path ); 
+	}
+	
+	public static File asPackageFile( File aodir, String name, int version )
+	{
+		return new File( aodir, name + "-v" + version + ".zip" );	
+	}
+	
+	public static List<AOManifest> getManifestList( Context context )
+	{
+	    File aoroot = Filer.create(context, false, Type.AOCACHE).getDirectory();
+	    
+	    List<AOManifest> result = new ArrayList<AOManifest>();
+	    for( File aodir : aoroot.listFiles() )
+	    {
+	    	AOManifest manifest = load( aodir );
+	    	if( manifest != null ) result.add( manifest );
+	    }
+	    return result;  
+	}
+	
+	private static AOManifest load( File aodir )
+	{
+    	File mfile = new File( aodir, "manifest.json" );
+    	if( !mfile.exists() )
+    	{
+    		// create a mostly empty placeholder
+    		AOManifest manifest = new AOManifest();
+    		manifest.setId( aodir.getName() );
+    		manifest.setTitle( "?" );
+    		return manifest;
+    	}
+    	
+    	try
+    	{
+    		String json = Filer.fromFile( mfile );
+    		return JsonTool.fromJson(json, AOManifest.class);
+    	}
+    	catch( Exception ex )
+    	{
+    		Log.e(TAG, "Failed to load ao manifest " + mfile, ex);
+    		return null;
+    	}		
+	}
+	
+	public static AOManifest getManifest( Context context, String ao )
+	{
+	    File aodir = Filer.create( context, false, Type.AOCACHE, ao ).getDirectory();
+	    return load( aodir ); 
+	}
+	
+	public static boolean verify( Context ctx, String ao, String packageName, File packageFile, LocalLogger logr )
+	{	
+		// make sure package directory exists
+		File aodir = Filer.create( ctx, true, Type.AO, ao ).getDirectory();
+		File packagedir = new File( aodir, packageName );
+		if( !packagedir.exists() )
+		{
+			String error = "Cannot verify package " + packageName + " because directory is missing";
+			Log.e( TAG, error );
+			if( logr != null ) logr.e( error );
+			return false;
+		}
+				
+		// test unzip 
+		return unzip( packageName, packageFile, aodir, true, logr );
+	}
+	
+	public static boolean makeReady( Context ctx, String ao, String packageName, File packageFile, LocalLogger logr )
+	{	
+		// remove stale package directory and all package files
+		File aodir = Filer.create( ctx, true, Type.AO, ao ).getDirectory();
+		File packagedir = new File( aodir, packageName );
+		File tmp = null;
+		if( packagedir.exists() )
+		{
+			// rename in case any handles are open
+			tmp = new File( packagedir.getAbsolutePath() + ".tmp" );
+			if( tmp.exists() )
+			{
+				// bad, stale one hasn't been cleaned up yet
+				if( Filer.deleteDir( tmp ) )
+				{
+					Log.d( TAG, "Removed stale package.tmp to make way for new: " + tmp );	
+				}
+				else
+				{
+					String error = "Failed to remove stale package.tmp to make way for new: " + tmp;
+					Log.e( TAG, error );
+					if( logr != null ) logr.e( error );
+					return false;
+				}
+			}
+			if( !packagedir.renameTo( tmp ) )
+			{
+				String error = "Failed to rename package to make way for new: " + tmp;
+				Log.e( TAG, error );
+				if( logr != null ) logr.e( error );
+				return false;
+			}
+		}
+		
+		/* Find new package zip (one with highest version)
+		File cachedir = Filer.create( ctx, false, Type.AOCACHE, ao ).getDirectory();
+		int latestVersion = -1;
+		File latestPackage = null;
+		for( File f : cachedir.listFiles() )
+		{
+			Matcher m = packageFilePattern.matcher( f.getName() );
+			if( !m.find() ) continue;	// not the package filename pattern
+
+			String name = m.group( 1 );
+			if( name.equals( packageName ) != true ) continue;
+			
+			int version = StringTool.asInteger( m.group( 2 ), -1 );
+			if( version > latestVersion )
+			{
+				latestVersion = version;
+				latestPackage = f;
+			}
+		}*/
+		
+		// unzip 
+		boolean success = unzip( packageName, packageFile, aodir, false, logr );
+		
+		if( tmp != null && Filer.deleteDir( tmp ) == false )
+		{
+			String warning = "Failed to clean up tmp package at " + tmp;
+			Log.w( TAG, warning );
+			if( logr != null ) logr.w( warning );
+		}
+		
+		return success;
+	}
+	
+	public static final void copyInputStream( InputStream in, OutputStream out )
+		throws IOException
+	{
+		byte[] buffer = new byte[1024];
+		int len;
+
+		while ((len = in.read(buffer)) >= 0)
+			out.write(buffer, 0, len);
+
+		in.close();
+		out.close();
+	}
+	
+	private static boolean hasPackageInPath( String prefix, File zipfile )
+		throws IOException
+	{
+		ZipFile zipFile = new ZipFile( zipfile );
+		try
+		{
+			Enumeration<? extends ZipEntry> entries = zipFile.entries();
+			while( entries.hasMoreElements() )
+			{
+				ZipEntry entry = entries.nextElement();
+				String name = entry.getName();
+				if( name.startsWith( "__MACOSX/" ) ) continue;	// annoying OS X addition
+				if( !name.startsWith( prefix ) ) return false;
+			}
+			
+			return true;
+		}
+		finally
+		{
+			zipFile.close();
+		}
+	}
+
+	private static boolean unzip( String packageName, File packageZipfile, File aoDir, boolean dryrun, LocalLogger logr )
+	{
+		String prefix = packageName + '/';
+		
+		String status = ( dryrun ? "Verifying " : "Unzipping " ) + packageZipfile;
+		Log.d( TAG, status );
+		if( logr != null ) logr.i( status );
+		
+		try
+		{
+			File root = aoDir;
+			boolean hasPackageInPath = hasPackageInPath( prefix, packageZipfile );
+			if( !hasPackageInPath )
+			{
+				// if the zipfile entries do not contain the package name, drop us down a level
+				root = new File( aoDir, packageName );
+				if( !dryrun && !root.exists() )
+				{
+					if( !root.mkdir() )
+					{
+						String error = "Failed to create directory " + root + " while unzipping " + packageZipfile;
+						Log.e( TAG, error );
+						if( logr != null ) logr.e( error );
+						return false;
+					}
+				}
+			}
+			
+			if( packageName.equals( "maptiles" ) )
+			{
+				if( dryrun )
+				{
+			        File nomedia = new File( root, ".nomedia" );
+			        if( !nomedia.exists() )
+			        {
+			        	String error = "Missing .nomedia file at " + nomedia;
+						Log.e( TAG, error );
+						if( logr != null ) logr.e( error );
+						return false;
+			        }
+				}
+				else
+				{
+					Filer.setupNoMedia( root );
+				}
+			}
+			
+			ZipFile zipFile = new ZipFile( packageZipfile );
+			Enumeration<? extends ZipEntry> entries = zipFile.entries();
+			boolean success = true;	// optimist
+			while( entries.hasMoreElements() )
+			{
+				ZipEntry entry = entries.nextElement();
+				
+				String name = entry.getName();
+				if( name.startsWith( "__MACOSX/" ) )
+				{
+					Log.w( TAG, "Ignoring mac OS X file " + name );
+					continue;
+				}
+				File f = new File( root, name );
+				
+				if( dryrun )
+				{
+					// make sure file exists
+					Log.d( TAG, "Checking " + f );		// TODO remove
+					if( !f.exists() )
+					{
+						String error = "Missing package file " + f ;
+						Log.w( TAG, error );
+						if( logr != null ) logr.e( error );
+						success = false;
+					}
+					else if( !f.isDirectory() && !entry.isDirectory()
+							 && f.length() != entry.getSize() )
+					{
+						// oops, not the right size
+						String error = "Uncompressed file size of " + f.length()
+								+ " does not match source " + entry.getName()
+								+ " size of " + entry.getSize();
+						Log.w( TAG, error );
+						if( logr != null ) logr.e( error );
+						success = false;
+					}
+					
+					continue;
+				}
+				
+				if( entry.isDirectory() )
+				{
+					if( !ensureDirectory( f, logr ) ) return false;
+				}
+				else
+				{
+					if( !ensureDirectory( f.getParentFile(), logr ) ) return false;
+					
+					Log.e(TAG,  "Extracting " + f.getAbsolutePath() );
+					
+					InputStream in = zipFile.getInputStream( entry );
+					OutputStream out = new BufferedOutputStream( new FileOutputStream( f ) );
+					copyInputStream( in, out );
+				}
+			}
+
+			zipFile.close();
+			return success;
+		}
+		catch( IOException ex ) 
+		{
+			String error = "Failed to unzip " + packageZipfile + " to " + aoDir;
+			Log.e( TAG, error, ex );
+			if( logr != null ) logr.e( error );
+			return false;
+		}
+	}
+	
+	private static boolean ensureDirectory( File d, LocalLogger logr )
+	{
+		if( d.exists() ) return true;	// that was easy!	
+		if( d.mkdirs() ) return true;	// success!
+		
+		String error = "Failed to create directory " + d;
+		Log.e( TAG, error );
+		if( logr != null ) logr.e( error );
+		return false;
+	}
+	
+	// mark an AO as one we should sync with
+	public static boolean addAO( Context ctx, String ao )
+	{
+		File aodir = Filer.create( ctx, true, Type.AOCACHE, ao ).getDirectory();	
+		return aodir.mkdir();
+	}
+	
+	public static boolean deleteAO( Context ctx, String ao )
+	{
+		// delete unzipped files
+		File aodir = Filer.create( ctx, true, Type.AO, ao ).getDirectory();
+		if( !Filer.deleteDir( aodir ) )
+		{
+			return false;
+		}
+		
+		// delete zipped files
+		aodir = Filer.create( ctx, true, Type.AOCACHE, ao ).getDirectory();
+		boolean success = Filer.deleteDir( aodir );
+		
+		/* flush zone manager cache
+		MyApplication.getSingleton().getZoneManager( true ).reload();
+		*/
+
+		return success;
+	}
+}
